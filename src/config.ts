@@ -11,7 +11,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().default('sqlite:./data/bot.db'),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   DRY_RUN: z
-    .string()
+    .enum(['true', 'false'])
     .transform((v) => v === 'true')
     .default('false'),
 });
@@ -34,11 +34,20 @@ export function loadEnvConfig(): EnvConfig {
     throw new Error(`Invalid environment configuration:\n${issues}`);
   }
   const env = result.data;
+
+  const discordForumChannelIds = env.DISCORD_FORUM_CHANNEL_IDS.split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
+
+  if (discordForumChannelIds.length === 0) {
+    throw new Error(
+      'DISCORD_FORUM_CHANNEL_IDS must contain at least one channel ID after parsing',
+    );
+  }
+
   return {
     discordToken: env.DISCORD_TOKEN,
-    discordForumChannelIds: env.DISCORD_FORUM_CHANNEL_IDS.split(',')
-      .map((id) => id.trim())
-      .filter(Boolean),
+    discordForumChannelIds,
     githubToken: env.GITHUB_TOKEN,
     githubOwner: env.GITHUB_OWNER,
     githubRepo: env.GITHUB_REPO,
@@ -52,7 +61,13 @@ export function loadAppConfig(configPath = 'config.json'): AppConfig {
   if (!existsSync(configPath)) {
     return appConfigSchema.parse({});
   }
-  const raw = JSON.parse(readFileSync(configPath, 'utf-8')) as unknown;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to parse ${configPath}: ${message}`);
+  }
   const result = appConfigSchema.safeParse(raw);
   if (!result.success) {
     const issues = result.error.issues.map((i) => `  ${i.path.join('.')}: ${i.message}`).join('\n');

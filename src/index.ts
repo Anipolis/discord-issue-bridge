@@ -19,23 +19,31 @@ async function main(): Promise<void> {
   const octokit = createOctokit(envConfig.githubToken);
   const client = createDiscordClient();
 
+  const activeTasks = new Set<Promise<void>>();
+  let isShuttingDown = false;
+
   client.once(Events.ClientReady, (c) => {
     logger.info('bot_ready', { username: c.user.tag });
   });
 
-  client.on(Events.ThreadCreate, async (thread, newlyCreated) => {
-    await handleThreadCreate(thread, newlyCreated, db, octokit, envConfig, appConfig);
+  client.on(Events.ThreadCreate, (thread, newlyCreated) => {
+    if (isShuttingDown) return;
+    const task = handleThreadCreate(thread, newlyCreated, db, octokit, envConfig, appConfig);
+    activeTasks.add(task);
+    void task.finally(() => activeTasks.delete(task));
   });
 
-  const shutdown = (): void => {
+  const shutdown = async (): Promise<void> => {
     logger.info('bot_shutting_down');
+    isShuttingDown = true;
     client.destroy();
+    await Promise.allSettled([...activeTasks]);
     db.close();
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => { void shutdown(); });
+  process.on('SIGTERM', () => { void shutdown(); });
 
   await client.login(envConfig.discordToken);
 }

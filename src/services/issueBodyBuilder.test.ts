@@ -25,6 +25,11 @@ describe('escapeMentions', () => {
     expect(escapeMentions('@here 確認してください')).toContain('@​here');
   });
 
+  it('一般的な@ユーザー名をエスケープする', () => {
+    const result = escapeMentions('hello @octocat world');
+    expect(result).not.toContain('@octocat');
+  });
+
   it('通常テキストは変更しない', () => {
     expect(escapeMentions('普通のテキスト')).toBe('普通のテキスト');
   });
@@ -33,6 +38,11 @@ describe('escapeMentions', () => {
 describe('buildTitle', () => {
   it('スレッド名をそのままタイトルにする', () => {
     expect(buildTitle('バグ報告: ログインできない')).toBe('バグ報告: ログインできない');
+  });
+
+  it('タイトル中の@メンションを無害化する', () => {
+    const result = buildTitle('@octocat ログイン不具合');
+    expect(result).not.toContain('@octocat ');
   });
 });
 
@@ -70,5 +80,10 @@ describe('buildBody', () => {
   it('@everyoneをエスケープする', () => {
     const body = buildBody({ ...basePost, body: '@everyone 全員注目' });
     expect(body).not.toContain('@everyone 全員注目');
+  });
+
+  it('投稿者名中の@メンションを無害化する', () => {
+    const body = buildBody({ ...basePost, authorName: '@octocat' });
+    expect(body).not.toContain('投稿者: @octocat /');
   });
 });

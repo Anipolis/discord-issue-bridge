@@ -1,8 +1,8 @@
-import type { AnyThreadChannel } from 'discord.js';
+import type { AnyThreadChannel, Message } from 'discord.js';
 import type { Octokit } from '@octokit/rest';
 import type { Db } from '../db/index.js';
 import type { AppConfig, EnvConfig } from '../types/index.js';
-import { findByThreadId, insert } from '../db/issueLinks.js';
+import { findByThreadId, claimThread, finalizeThread, releaseThread } from '../db/issueLinks.js';
 import { getExistingLabelNames, filterLabels } from '../github/labels.js';
 import { createIssue } from '../github/createIssue.js';
 import { resolveTagNames, hasIgnoreTag, mapToGitHubLabels } from './tagMapper.js';
@@ -17,11 +17,11 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function fetchStarterMessageWithRetry(thread: AnyThreadChannel): Promise<string> {
+async function fetchStarterMessageWithRetry(thread: AnyThreadChannel): Promise<Message | null> {
   for (let attempt = 1; attempt <= STARTER_MESSAGE_RETRIES; attempt++) {
     try {
       const msg = await thread.fetchStarterMessage({ force: true });
-      if (msg) return msg.content;
+      if (msg) return msg;
     } catch {
       // fall through to retry
     }
@@ -30,7 +30,7 @@ async function fetchStarterMessageWithRetry(thread: AnyThreadChannel): Promise<s
     }
   }
   logger.warn('starter_message_not_found', { thread_id: thread.id });
-  return '';
+  return null;
 }
 
 export async function forumPostToIssue(
@@ -43,6 +43,8 @@ export async function forumPostToIssue(
   const { githubOwner, githubRepo, dryRun } = envConfig;
   const threadId = thread.id;
   const guildId = thread.guildId;
+  const channelId = thread.parentId ?? thread.id;
+  const url = threadUrl(guildId, threadId);
 
   // Bot 自身が作成したスレッドは除外
   const botId = thread.client.user?.id;
@@ -51,34 +53,77 @@ export async function forumPostToIssue(
     return;
   }
 
-  // DB 重複確認
-  const existing = findByThreadId(db, threadId);
-  if (existing) {
-    logger.info('already_linked', {
-      thread_id: threadId,
-      github_issue_url: existing.github_issue_url,
-    });
-    if (appConfig.replyWhenAlreadyLinked) {
-      await thread.send(
-        `このスレッドは既にIssue化済みだぞ。\n\n${existing.github_issue_url}`,
-      );
+  // DB 重複確認（DRY_RUN 以外）
+  if (!dryRun) {
+    const existing = findByThreadId(db, threadId);
+    if (existing) {
+      if (existing.github_issue_number > 0) {
+        logger.info('already_linked', {
+          thread_id: threadId,
+          github_issue_url: existing.github_issue_url,
+        });
+        if (appConfig.replyWhenAlreadyLinked) {
+          await thread.send(
+            `このスレッドは既にIssue化済みだぞ。\n\n${existing.github_issue_url}`,
+          );
+        }
+      } else {
+        // 別ハンドラが同スレッドを処理中（pending 行が存在）
+        logger.debug('thread_already_claimed', { thread_id: threadId });
+      }
+      return;
     }
-    return;
   }
 
-  // 開始メッセージ取得（レースコンディション対策のリトライ付き）
-  const bodyText = await fetchStarterMessageWithRetry(thread);
-
-  // タグ取得
+  // タグ取得（同期・キャッシュ済みデータから）
   const parentChannel = thread.parent;
   const availableTags =
     parentChannel && 'availableTags' in parentChannel ? parentChannel.availableTags : [];
   const tagNames = resolveTagNames(thread.appliedTags, availableTags);
 
-  // ignoreTags 判定
+  // ignoreTags 判定（GitHub API 呼び出し前に早期リターン）
   if (hasIgnoreTag(tagNames, appConfig.ignoreTags)) {
     logger.info('skipping_ignored_tags', { thread_id: threadId, tags: tagNames });
     return;
+  }
+
+  // DB に pending 予約（GitHub API 呼び出し前に原子的に確保）
+  if (!dryRun) {
+    const claimed = claimThread(db, {
+      discord_guild_id: guildId,
+      discord_channel_id: channelId,
+      discord_thread_id: threadId,
+      discord_thread_url: url,
+      github_owner: githubOwner,
+      github_repo: githubRepo,
+      created_by_discord_user_id: thread.ownerId ?? 'unknown',
+      created_by_discord_username: 'unknown',
+    });
+    if (!claimed) {
+      logger.debug('thread_claim_failed_concurrent', { thread_id: threadId });
+      return;
+    }
+  }
+
+  // 開始メッセージ取得（レースコンディション対策のリトライ付き）
+  // body・author・attachments を同一取得結果から組み立てることでデータ不整合を防ぐ
+  const starterMessage = await fetchStarterMessageWithRetry(thread);
+  const bodyText = starterMessage?.content ?? '';
+  const authorId = starterMessage?.author?.id ?? thread.ownerId ?? 'unknown';
+  const authorName = starterMessage?.author?.username ?? 'unknown';
+  const attachmentUrls = starterMessage
+    ? [...starterMessage.attachments.values()].map((a) => a.url)
+    : [];
+
+  // pending 行の投稿者情報を更新（claimThread 時点では unknown だったため）
+  if (!dryRun) {
+    db.prepare(
+      `UPDATE issue_links SET
+         created_by_discord_user_id = ?,
+         created_by_discord_username = ?,
+         updated_at = datetime('now')
+       WHERE discord_thread_id = ? AND github_issue_number = 0`,
+    ).run(authorId, authorName, threadId);
   }
 
   // タグ → ラベル変換
@@ -89,15 +134,6 @@ export async function forumPostToIssue(
     const { valid } = filterLabels(desiredLabels, existingLabelNames);
     labels = valid;
   }
-
-  // 投稿者情報
-  const starterMessage = await thread.fetchStarterMessage({ force: true }).catch(() => null);
-  const authorId = starterMessage?.author?.id ?? thread.ownerId ?? 'unknown';
-  const authorName = starterMessage?.author?.username ?? 'unknown';
-  const attachmentUrls = starterMessage ? [...starterMessage.attachments.values()].map((a) => a.url) : [];
-  const channelId = thread.parentId ?? thread.id;
-
-  const url = threadUrl(guildId, threadId);
 
   const postData = {
     threadId,
@@ -130,28 +166,22 @@ export async function forumPostToIssue(
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.error('issue_create_failed', { thread_id: threadId, error: message });
-    await thread.send('GitHub Issueの作成に失敗した。\n\n管理者がログを確認してくれ。').catch(() => undefined);
+    if (!dryRun) {
+      releaseThread(db, threadId);
+    }
+    await thread
+      .send('GitHub Issueの作成に失敗した。\n\n管理者がログを確認してくれ。')
+      .catch(() => undefined);
     return;
   }
 
-  // DB 保存（DRY_RUN 時もスキップ）
+  // DB 確定（pending → 実 Issue 番号）
   if (!dryRun) {
     try {
-      insert(db, {
-        discord_guild_id: guildId,
-        discord_channel_id: channelId,
-        discord_thread_id: threadId,
-        discord_thread_url: url,
-        github_owner: githubOwner,
-        github_repo: githubRepo,
-        github_issue_number: created.number,
-        github_issue_url: created.url,
-        created_by_discord_user_id: authorId,
-        created_by_discord_username: authorName,
-      });
+      finalizeThread(db, threadId, created.number, created.url);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      logger.error('db_insert_failed', {
+      logger.error('db_finalize_failed', {
         level: 'critical',
         thread_id: threadId,
         github_issue_url: created.url,

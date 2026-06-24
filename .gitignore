@@ -3,3 +3,5 @@ data/
 dist/
 node_modules/
 *.db
+*.db-wal
+*.db-shm

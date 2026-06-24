@@ -1,11 +1,26 @@
 import type { Octokit } from '@octokit/rest';
 import { logger } from '../utils/logger.js';
 
+const LABEL_CACHE_TTL_MS = 60_000;
+
+interface CacheEntry {
+  labels: Set<string>;
+  fetchedAt: number;
+}
+
+const labelCache = new Map<string, CacheEntry>();
+
 export async function getExistingLabelNames(
   octokit: Octokit,
   owner: string,
   repo: string,
 ): Promise<Set<string>> {
+  const key = `${owner}/${repo}`;
+  const cached = labelCache.get(key);
+  if (cached && Date.now() - cached.fetchedAt < LABEL_CACHE_TTL_MS) {
+    return cached.labels;
+  }
+
   const names = new Set<string>();
   let page = 1;
   while (true) {
@@ -16,6 +31,8 @@ export async function getExistingLabelNames(
     if (data.length < 100) break;
     page++;
   }
+
+  labelCache.set(key, { labels: names, fetchedAt: Date.now() });
   return names;
 }
 
