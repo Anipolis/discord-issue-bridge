@@ -1,0 +1,19 @@
+{
+  "tagMap": {
+    "バグ": "bug",
+    "不具合": "bug",
+    "機能要望": "enhancement",
+    "質問": "question",
+    "優先度高": "priority: high",
+    "ドキュメント": "documentation"
+  },
+  "ignoreTags": [
+    "雑談",
+    "Issue化しない",
+    "メモ"
+  ],
+  "createMissingLabels": false,
+  "replyWhenCreated": true,
+  "replyWhenAlreadyLinked": false,
+  "syncThreadRepliesToIssueComments": false
+}
