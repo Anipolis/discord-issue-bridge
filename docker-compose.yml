@@ -5,4 +5,6 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
-      - ./config.json:/app/config.json:ro
+      # config.json をカスタマイズする場合は以下のコメントを解除してください。
+      # 先に `cp config.example.json config.json` を実行してから起動してください。
+      # - ./config.json:/app/config.json:ro

@@ -2,8 +2,8 @@ import type { AnyThreadChannel, Message } from 'discord.js';
 import type { Octokit } from '@octokit/rest';
 import type { Db } from '../db/index.js';
 import type { AppConfig, EnvConfig } from '../types/index.js';
-import { findByThreadId, claimThread, finalizeThread, releaseThread } from '../db/issueLinks.js';
-import { getExistingLabelNames, filterLabels } from '../github/labels.js';
+import { findByThreadId, claimThread, finalizeThread, releaseThread, updatePendingAuthor } from '../db/issueLinks.js';
+import { getExistingLabelNames, filterLabels, ensureLabels } from '../github/labels.js';
 import { createIssue } from '../github/createIssue.js';
 import { resolveTagNames, hasIgnoreTag, mapToGitHubLabels } from './tagMapper.js';
 import { buildTitle, buildBody } from './issueBodyBuilder.js';
@@ -53,7 +53,8 @@ export async function forumPostToIssue(
     return;
   }
 
-  // DB 重複確認（DRY_RUN 以外）
+  // DB 重複確認（DRY_RUN 時は DB に書き込まないため重複チェックもスキップ。
+  // テスト目的で同スレッドを複数回処理する場合は DRY_RUN=true を使うこと）
   if (!dryRun) {
     const existing = findByThreadId(db, threadId);
     if (existing) {
@@ -117,13 +118,7 @@ export async function forumPostToIssue(
 
   // pending 行の投稿者情報を更新（claimThread 時点では unknown だったため）
   if (!dryRun) {
-    db.prepare(
-      `UPDATE issue_links SET
-         created_by_discord_user_id = ?,
-         created_by_discord_username = ?,
-         updated_at = datetime('now')
-       WHERE discord_thread_id = ? AND github_issue_number = 0`,
-    ).run(authorId, authorName, threadId);
+    updatePendingAuthor(db, threadId, authorId, authorName);
   }
 
   // タグ → ラベル変換
@@ -131,8 +126,12 @@ export async function forumPostToIssue(
   let labels: string[] = [];
   if (desiredLabels.length > 0) {
     const existingLabelNames = await getExistingLabelNames(octokit, githubOwner, githubRepo);
-    const { valid } = filterLabels(desiredLabels, existingLabelNames);
-    labels = valid;
+    if (appConfig.createMissingLabels) {
+      labels = await ensureLabels(octokit, githubOwner, githubRepo, desiredLabels, existingLabelNames);
+    } else {
+      const { valid } = filterLabels(desiredLabels, existingLabelNames);
+      labels = valid;
+    }
   }
 
   const postData = {

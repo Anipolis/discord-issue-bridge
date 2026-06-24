@@ -1,5 +1,7 @@
 import type { ForumPostData } from '../types/index.js';
 
+// GitHub Issue に貼り付けるとユーザー通知が飛ぶため、Discord 由来のメンションを全て
+// ゼロ幅スペース(U+200B)で無害化する。@everyone/@here に加え一般 @username も対象。
 export function escapeMentions(text: string): string {
   return text
     .replace(/@everyone/g, '@​everyone')

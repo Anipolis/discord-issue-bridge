@@ -13,7 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 make g+
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=builder /app/dist ./dist
-COPY src/db/schema.sql ./dist/db/schema.sql
 RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
 VOLUME ["/app/data"]
 USER appuser

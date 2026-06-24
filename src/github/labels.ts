@@ -2,6 +2,7 @@ import type { Octokit } from '@octokit/rest';
 import { logger } from '../utils/logger.js';
 
 const LABEL_CACHE_TTL_MS = 60_000;
+const DEFAULT_LABEL_COLOR = 'ededed';
 
 interface CacheEntry {
   labels: Set<string>;
@@ -53,4 +54,31 @@ export function filterLabels(
     logger.warn('labels_not_found', { missing });
   }
   return { valid, missing };
+}
+
+/**
+ * Resolves desired labels against existing ones.
+ * When createMissingLabels is true, missing labels are created (with a default color)
+ * so every mapped tag gets a GitHub label applied.
+ */
+export async function ensureLabels(
+  octokit: Octokit,
+  owner: string,
+  repo: string,
+  desired: string[],
+  existing: Set<string>,
+): Promise<string[]> {
+  const { valid, missing } = filterLabels(desired, existing);
+  for (const name of missing) {
+    try {
+      await octokit.issues.createLabel({ owner, repo, name, color: DEFAULT_LABEL_COLOR });
+      valid.push(name);
+      existing.add(name);
+      logger.info('label_created', { owner, repo, name });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.warn('label_create_failed', { name, error: message });
+    }
+  }
+  return valid;
 }
